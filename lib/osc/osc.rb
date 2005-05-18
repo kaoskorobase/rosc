@@ -42,7 +42,7 @@ class Integer
     (self > 3) and (self & 3).zero?
   end
   def osc_encode_on(types, buf) # :nodoc:
-    types << 105 # 'i'
+    types << OSC::TYPE_INT32
     buf.put_i32(self)
   end
 end
@@ -55,7 +55,7 @@ end
 
 class Float # :nodoc:
   def osc_encode_on(types, buf)
-    types << 102 # 'f'
+    types << OSC::TYPE_FLOAT32
     buf.put_f32(self)
   end
 end
@@ -67,31 +67,10 @@ end
 
 class String # :nodoc:
   def osc_encode_on(types, buf)
-    types << 115 # 's'
+    types << OSC::TYPE_STRING
     buf.put_data(self)
   end
 end
-
-# class Time
-#   # construction
-#   def Time.osctime_f(t)
-#     # wow, no max in Comparable
-#     t = t - OSC::SECONDS_FROM_UTC_TO_UNIX_EPOCH
-#     self.at(t > 0.0 ? t : 0.0)
-#   end
-#   def Time.osctime_i(t)
-#     self.osctime_f(t * OSC::TIME_TO_SECONDS)
-#   end
-# 
-#   # conversion
-#   def osctime_f
-#     self.to_f + OSC::SECONDS_FROM_UTC_TO_UNIX_EPOCH
-#   end
-#   def osctime_i
-#     t = self.osctime_f
-#     (t.to_i << 32) + ((t * OSC::SECONDS_TO_TIME).to_i & OSC::UINT_MASK)
-#   end
-# end
 
 class TrueClass # :nodoc:
   def osc_encode_on(types, buf)
@@ -100,11 +79,19 @@ class TrueClass # :nodoc:
 end
 
 module OSC
+  BUNDLE_STRING = "#bundle\0" # :nodoc:
+  BUNDLE_REGEXP = Regexp.compile("^" + Regexp.quote(BUNDLE_STRING)) # :nodoc:
+
+  TYPE_TAG_START = 44 # ','
+  TYPE_INT32 = 105    # 'i'
+  TYPE_FLOAT32 = 102  # 'f'
+  TYPE_STRING = 115   # 's'
+  TYPE_BLOB = 98      # 'b'
+
   SECONDS_FROM_UTC_TO_UNIX_EPOCH = 2208988800.0 # :nodoc:
   SECONDS_TO_TIME = 2.0 ** 32.0 # :nodoc:
   TIME_TO_SECONDS = 1.0 / SECONDS_TO_TIME # :nodoc:
-  BUNDLE_STRING = "#bundle\0" # :nodoc:
-  BUNDLE_REGEXP = /^#bundle\0/ # :nodoc:
+
   INT_MASK = 0x80000000 # :nodoc:
   UINT_MASK = 0xFFFFFFFF # :nodoc:
 
@@ -134,7 +121,7 @@ module OSC
 
     # :section:OSC support
     def osc_encode_on(types, buf)
-      types << 98 # 'b'
+      types << OSC::TYPE_BLOB
       buf.put_i32(@data.size)
       buf.put_data(@data)
     end
@@ -187,8 +174,17 @@ module OSC
     def msg?
       false
     end
+    def empty?
+      @args.empty?
+    end
 
     # accessing
+    def size
+      @args.size
+    end
+    def [](index)
+      @args[index]
+    end
     def <<(obj)
       @args << obj
       self
@@ -306,26 +302,11 @@ module OSC
     def Msg.decode_from(buf)
       addr = buf.get_s
       types = buf.get_s
-      unless types[0] == 44 # ','
+      unless types[0] == TYPE_TAG_START
         raise OSC::ParseError, "invalid type tag string"
       end
       args = Array.new(types.size-1)
-      args.size.times { | i |
-        case types[i+1]
-        when 98  # 'b'
-          args[i] = OSC::Blob(buf.get_b(n))
-        when 100 # 'd'
-          args[i] = buf.get_f64
-        when 102 # 'f'
-          args[i] = buf.get_f32
-        when 105 # 'i'
-          args[i] = buf.get_i32
-        when 115 # 's'
-          args[i] = buf.get_s
-        else
-          raise OSC::ParseError, "invalid type tag"
-        end
-      }
+      args.size.times { |i| args[i] = buf.get_obj(types[i+1]) }
       self.new(addr, args)
     end
 
@@ -373,6 +354,13 @@ module OSC
   end
 
   class Buffer
+    OBJECT_READER_MAP = {
+      TYPE_INT32 => :get_i32,
+      TYPE_FLOAT32 => :get_f32,
+      TYPE_STRING => :get_s,
+      TYPE_BLOB => :get_b
+    }
+
     # buffer for reading/writing OSC
     attr_reader :data
 
@@ -455,7 +443,14 @@ module OSC
     # A 32 bit byte count is followed by that amount of data, padded to a multiple of 4 bytes.
     def get_b
       n = self.get_i32
-      self.get_data(n)
+      OSC::Blob(self.get_data(n))
+    end
+    # Read object according to type tag.
+    def get_obj(type_tag)
+      if id = OBJECT_READER_MAP[type_tag]
+        return self.send(id)
+      end
+      raise OSC::ParseError, "invalid type tag"
     end
 
     # :section:Writing
@@ -527,4 +522,5 @@ def OSC.test # :nodoc:
 end
 
 OSC.test if __FILE__ == $0
+
 # EOF
