@@ -130,18 +130,20 @@ module OSC
   # OSC time representation.
   class Time
     # Return current OSC time.
-    def Time.now
+    def self.now
       Object::Time.now.to_f + SECONDS_FROM_UTC_TO_UNIX_EPOCH
     end
     # Convert network time (unsigned long long) to OSC time.
-    def Time.from_i(t)
+    def self.from_i(t)
       t * TIME_TO_SECONDS
     end
     # Convert to network time (unsigned long long).
-    def Time.to_i(t)
+    def self.to_i(t)
       t = (t.to_i << 32) + ((t * SECONDS_TO_TIME).to_i & UINT_MASK)
       t.zero? ? 1 : t
     end
+    MIN_I = self.to_i(0)
+    MIN_F = self.from_i(MIN_I)
   end
 
   class Packet
@@ -326,7 +328,7 @@ module OSC
       @addr = addr.to_s
     end
     def time
-      @time or (@time = Time.now)
+      @time or (@time = Time::MIN_F)
     end
     def time=(time)
       @time = time
@@ -384,6 +386,7 @@ module OSC
     end
     def skip(n)
       @data = @data[n..-1]
+      @data = "" unless @data
       self
     end
 
@@ -443,7 +446,7 @@ module OSC
     # A 32 bit byte count is followed by that amount of data, padded to a multiple of 4 bytes.
     def get_b
       n = self.get_i32
-      OSC::Blob(self.get_data(n))
+      OSC::Blob.new(self.get_data(n))
     end
     # Read object according to type tag.
     def get_obj(type_tag)
@@ -489,6 +492,34 @@ module OSC
       self
     end
   end # class Buffer
+
+  class Map < Hash
+    # Install command handler.
+    def on(cmd, &proc)
+      self[cmd] = proc
+    end
+    # Dispatch OSC packet.
+    def dispatch(pkt)
+      pkt.each_msg { |msg| queue_msg(msg) }
+    end
+    # Dispatch OSC message.
+    def dispatch_msg(msg)
+      proc = self[msg.addr]
+      if proc
+        begin
+          proc.call(msg)
+        rescue
+          $!
+        end
+      end
+    end
+    protected
+    # Subclasses may override to queue bundles according to their
+    # timestamp.
+    def queue_msg(msg)
+      dispatch_msg(msg)
+    end
+  end
 end # module OSC
 
 def OSC.test # :nodoc:
@@ -519,6 +550,15 @@ def OSC.test # :nodoc:
   sock.send(b0.encode, 0, *addr)
   sock.send(b1.encode, 0, *addr)
   sock.close
+
+  map = OSC::Map.new
+  map.on("/fooBar") do |msg| puts msg.inspect end
+  map.on("/hell/yeah") do |msg| puts msg.inspect end
+  map.on("/Whooha") do |msg| puts msg.inspect end
+
+  map.dispatch(m0)
+  map.dispatch(m1)
+  map.dispatch(b1)
 end
 
 OSC.test if __FILE__ == $0
